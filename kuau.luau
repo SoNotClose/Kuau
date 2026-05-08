@@ -1,10 +1,29 @@
 --  kuau.luau — host publicly on GitHub (raw URL)
---  DO NOT put credentials here. They're passed in by loader.
+--  DO NOT put credentials here. They are passed in by loader.
 
 local Kuau = {}
 local _cfg = { url = "", anon = "" }
 
-local HttpService = game:GetService("HttpService")
+local HttpService = (cloneref or function(x) return x end)(game:GetService("HttpService"))
+
+local function httpRequest(opts)
+	if syn and syn.request then
+		return syn.request(opts)
+	elseif http_request then
+		return http_request(opts)
+	elseif http and http.request then
+		return http.request(opts)
+	elseif request then
+		return request(opts)
+	else
+		return HttpService:RequestAsync({
+			Url     = opts.Url,
+			Method  = opts.Method,
+			Headers = opts.Headers,
+			Body    = opts.Body,
+		})
+	end
+end
 
 local function getHeaders()
 	return {
@@ -12,6 +31,12 @@ local function getHeaders()
 		["Authorization"] = "Bearer " .. _cfg.anon,
 		["Content-Type"]  = "application/json",
 	}
+end
+
+local function urlEncode(str)
+	return (str:gsub("([^%w%-%.%_%~ ])", function(c)
+		return string.format("%%%02X", string.byte(c))
+	end):gsub(" ", "+"))
 end
 
 local function parseISO8601(str)
@@ -23,10 +48,8 @@ local function parseISO8601(str)
 end
 
 local function httpGet(url)
-	local ok, res = pcall(HttpService.RequestAsync, HttpService, {
-		Url=url, Method="GET", Headers=getHeaders()
-	})
-	if not ok then return false, "Network error" end
+	local ok, res = pcall(httpRequest, { Url=url, Method="GET", Headers=getHeaders() })
+	if not ok then return false, "Network error: "..tostring(res) end
 	if res.StatusCode ~= 200 then return false, "Server error ("..res.StatusCode..")" end
 	local p, body = pcall(HttpService.JSONDecode, HttpService, res.Body)
 	if not p then return false, "Invalid response" end
@@ -34,11 +57,13 @@ local function httpGet(url)
 end
 
 local function httpPost(url, payload)
-	local ok, res = pcall(HttpService.RequestAsync, HttpService, {
-		Url=url, Method="POST", Headers=getHeaders(),
-		Body=HttpService:JSONEncode(payload)
+	local ok, res = pcall(httpRequest, {
+		Url     = url,
+		Method  = "POST",
+		Headers = getHeaders(),
+		Body    = HttpService:JSONEncode(payload),
 	})
-	if not ok then return false, "Network error" end
+	if not ok then return false, "Network error: "..tostring(res) end
 	if res.StatusCode ~= 200 and res.StatusCode ~= 201 then
 		return false, "Server error ("..res.StatusCode..")"
 	end
@@ -47,16 +72,8 @@ local function httpPost(url, payload)
 	return true, body
 end
 
--- init
---[[
-  Must be called first with your Supabase credentials.
-  Called automatically by the loader — end users never see this.
-
-  @example (loader does this for you)
-    Kuau.init({ url = "https://xxx.supabase.co", anon = "YOUR_ANON_KEY" })
-]]
 function Kuau.init(cfg)
-	assert(type(cfg) == "table",       "[Kuau] init() expects a table")
+	assert(type(cfg) == "table",        "[Kuau] init() expects a table")
 	assert(cfg.url  and cfg.url  ~= "", "[Kuau] missing url")
 	assert(cfg.anon and cfg.anon ~= "", "[Kuau] missing anon key")
 	_cfg.url  = cfg.url
@@ -67,18 +84,13 @@ local function assertInit()
 	assert(_cfg.url ~= "", "[Kuau] Call Kuau.init() before using Kuau.")
 end
 
--- ─── validate ──────────────────────────────────────────────
---[[
-  Check if a key is valid.
-  Returns { valid=true } or { valid=false, reason="..." }
-]]
 function Kuau.validate(key, hwid)
 	assertInit()
 	if not key or key == "" then return { valid=false, reason="No key provided" } end
 
 	local url = _cfg.url.."/rest/v1/kuau_keys"
 		.."?select=hwid,expiry,revoked,blacklisted"
-		.."&key=eq."..HttpService:UrlEncode(key)
+		.."&key=eq."..urlEncode(key)
 		.."&limit=1"
 
 	local ok, data = httpGet(url)
@@ -102,18 +114,10 @@ function Kuau.validate(key, hwid)
 	return { valid=true }
 end
 
--- ─── fetchScript ───────────────────────────────────────────
---[[
-  Validate key AND fetch your script from private storage.
-  Hits the kuau-serve Edge Function — no URL is ever exposed.
-  Script content is only returned after server-side key check.
-
-  Returns { valid=true, script="..." } or { valid=false, reason="..." }
-]]
 function Kuau.fetchScript(key, scriptName, hwid)
 	assertInit()
-	if not key or key == ""            then return { valid=false, reason="No key provided"    } end
-	if not scriptName or scriptName=="" then return { valid=false, reason="No script specified" } end
+	if not key or key == ""             then return { valid=false, reason="No key provided"    } end
+	if not scriptName or scriptName==""  then return { valid=false, reason="No script specified" } end
 
 	local ok, data = httpPost(_cfg.url.."/functions/v1/kuau-serve", {
 		key=key, scriptName=scriptName, hwid=hwid or ""
@@ -126,22 +130,13 @@ function Kuau.fetchScript(key, scriptName, hwid)
 	return { valid=true, script=data.script }
 end
 
--- ─── getTime ───────────────────────────────────────────────
---[[
-  Get remaining time on a key.
-  Returns one of:
-    { permanent=true }
-    { expired=true }
-    { days, hours, minutes, seconds, total_seconds }
-    { error="..." }
-]]
 function Kuau.getTime(key)
 	assertInit()
 	if not key or key == "" then return { error="No key provided" } end
 
 	local url = _cfg.url.."/rest/v1/kuau_keys"
 		.."?select=expiry,revoked,blacklisted"
-		.."&key=eq."..HttpService:UrlEncode(key)
+		.."&key=eq."..urlEncode(key)
 		.."&limit=1"
 
 	local ok, data = httpGet(url)
