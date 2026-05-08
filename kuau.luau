@@ -17,10 +17,8 @@ local function httpRequest(opts)
 		return request(opts)
 	else
 		return HttpService:RequestAsync({
-			Url     = opts.Url,
-			Method  = opts.Method,
-			Headers = opts.Headers,
-			Body    = opts.Body,
+			Url=opts.Url, Method=opts.Method,
+			Headers=opts.Headers, Body=opts.Body,
 		})
 	end
 end
@@ -58,10 +56,8 @@ end
 
 local function httpPost(url, payload)
 	local ok, res = pcall(httpRequest, {
-		Url     = url,
-		Method  = "POST",
-		Headers = getHeaders(),
-		Body    = HttpService:JSONEncode(payload),
+		Url=url, Method="POST", Headers=getHeaders(),
+		Body=HttpService:JSONEncode(payload),
 	})
 	if not ok then return false, "Network error: "..tostring(res) end
 	if res.StatusCode ~= 200 and res.StatusCode ~= 201 then
@@ -71,6 +67,17 @@ local function httpPost(url, payload)
 	if not p then return false, "Invalid response" end
 	return true, body
 end
+
+-- ─── HWID ──────────────────────────────────────────────────
+
+local function getHWID()
+	local ok, id = pcall(function()
+		return game:GetService("RbxAnalyticsService"):GetClientId()
+	end)
+	return ok and id or tostring(game:GetService("Players").LocalPlayer.UserId)
+end
+
+-- ─── INIT ──────────────────────────────────────────────────
 
 function Kuau.init(cfg)
 	assert(type(cfg) == "table",        "[Kuau] init() expects a table")
@@ -84,12 +91,21 @@ local function assertInit()
 	assert(_cfg.url ~= "", "[Kuau] Call Kuau.init() before using Kuau.")
 end
 
-function Kuau.validate(key, hwid)
+-- ─── validate ──────────────────────────────────────────────
+--[[
+  Check if a key is valid. Does NOT activate or set HWID.
+  Use redeem() for first-time activation.
+
+  Returns { valid=true } or { valid=false, reason="..." }
+]]
+function Kuau.validate(key)
 	assertInit()
 	if not key or key == "" then return { valid=false, reason="No key provided" } end
 
+	local hwid = getHWID()
+
 	local url = _cfg.url.."/rest/v1/kuau_keys"
-		.."?select=hwid,expiry,revoked,blacklisted"
+		.."?select=hwid,expiry,revoked,blacklisted,activated"
 		.."&key=eq."..urlEncode(key)
 		.."&limit=1"
 
@@ -106,21 +122,62 @@ function Kuau.validate(key, hwid)
 		if t and os.time() > t then return { valid=false, reason="Key has expired" } end
 	end
 
-	if r.hwid and r.hwid ~= "" then
-		if not hwid or hwid == "" then return { valid=false, reason="HWID required" } end
-		if r.hwid ~= hwid         then return { valid=false, reason="HWID mismatch" } end
+	-- If activated, enforce HWID
+	if r.activated and r.hwid and r.hwid ~= "" then
+		if r.hwid ~= hwid then return { valid=false, reason="HWID mismatch" } end
 	end
 
 	return { valid=true }
 end
 
-function Kuau.fetchScript(key, scriptName, hwid)
+-- ─── redeem ────────────────────────────────────────────────
+--[[
+  First-time activation. Call this when a player enters their key.
+  - Validates the key
+  - Locks it to the player's HWID via the Edge Function (service key)
+  - Marks it as activated
+  If already activated, checks HWID matches.
+
+  Returns { valid=true } or { valid=false, reason="..." }
+]]
+function Kuau.redeem(key)
+	assertInit()
+	if not key or key == "" then return { valid=false, reason="No key provided" } end
+
+	local hwid = getHWID()
+
+	-- Routes through Edge Function so the service key does the DB write.
+	-- Anon key cannot write — this is the correct way to activate.
+	local ok, data = httpPost(_cfg.url.."/functions/v1/kuau-serve", {
+		action = "redeem",
+		key    = key,
+		hwid   = hwid,
+	})
+
+	if not ok then return { valid=false, reason=data } end
+	if not data.valid then return { valid=false, reason=data.reason or "Invalid key" } end
+
+	return {
+		valid             = true,
+		already_activated = data.already_activated or false,
+		hwid              = hwid,
+	}
+end
+
+-- ─── fetchScript ───────────────────────────────────────────
+--[[
+  Redeem key + fetch script from private storage in one call.
+  Returns { valid=true, script="..." } or { valid=false, reason="..." }
+]]
+function Kuau.fetchScript(key, scriptName)
 	assertInit()
 	if not key or key == ""             then return { valid=false, reason="No key provided"    } end
 	if not scriptName or scriptName==""  then return { valid=false, reason="No script specified" } end
 
+	local hwid = getHWID()
+
 	local ok, data = httpPost(_cfg.url.."/functions/v1/kuau-serve", {
-		key=key, scriptName=scriptName, hwid=hwid or ""
+		key=key, scriptName=scriptName, hwid=hwid
 	})
 
 	if not ok          then return { valid=false, reason=data                         } end
@@ -129,6 +186,8 @@ function Kuau.fetchScript(key, scriptName, hwid)
 
 	return { valid=true, script=data.script }
 end
+
+-- ─── getTime ───────────────────────────────────────────────
 
 function Kuau.getTime(key)
 	assertInit()
@@ -156,6 +215,23 @@ function Kuau.getTime(key)
 		days=math.floor(rem/86400), hours=math.floor((rem%86400)/3600),
 		minutes=math.floor((rem%3600)/60), seconds=rem%60, total_seconds=rem,
 	}
+end
+
+-- ─── getHWID ───────────────────────────────────────────────
+--[[
+  Returns the player's HWID and copies it to clipboard.
+  Useful so players can send you their HWID if needed.
+]]
+function Kuau.getHWID()
+	local hwid = getHWID()
+	local cboard = setclipboard or toclipboard or set_clipboard or (Clipboard and Clipboard.set)
+	if cboard then
+		pcall(cboard, hwid)
+		print("[Kuau] HWID copied to clipboard:", hwid)
+	else
+		print("[Kuau] HWID:", hwid)
+	end
+	return hwid
 end
 
 return Kuau
